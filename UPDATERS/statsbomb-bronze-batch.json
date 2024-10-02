@@ -1,0 +1,38 @@
+{
+  "name" : "statsbomb-bronze-batch",
+  "jobMode" : "SCRIPT",
+  "description" : "",
+  "role" : "arn:aws:iam::127023367472:role/glue-jobs-role",
+  "executionProperty" : {
+    "maxConcurrentRuns" : 50
+  },
+  "command" : {
+    "name" : "pythonshell",
+    "scriptLocation" : "s3://aws-glue-assets-127023367472-eu-west-1/scripts/statsbomb-bronze-batch.py",
+    "pythonVersion" : "3.9"
+  },
+  "defaultArguments" : {
+    "--class" : "GlueApp",
+    "--enable-job-insights" : "false",
+    "--S3_AUTH" : "q7l7xp4-4s3wumqtl-1pb5n8c-d12dtebmtc",
+    "--enable-observability-metrics" : "false",
+    "--enable-glue-datacatalog" : "true",
+    "library-set" : "analytics",
+    "--S3_SECRET" : "r&R.RVvdlGW56KVHDg^3xi-uG0W)q#",
+    "--STATSBOMB_AUTH" : "YWxleEB0cmFpdHNpbnNpZ2h0cy5jb206bFdCTjJ4SWU=",
+    "--job-language" : "python",
+    "--TempDir" : "s3://aws-glue-assets-127023367472-eu-west-1/temporary/"
+  },
+  "maxRetries" : 0,
+  "allocatedCapacity" : 0,
+  "timeout" : 120,
+  "maxCapacity" : 1.0,
+  "glueVersion" : "3.0",
+  "executionClass" : "STANDARD",
+  "sourceControlDetails" : {
+    "provider" : "GITHUB",
+    "repository" : "traits-data",
+    "branch" : "main",
+    "folder" : "UPDATERS"
+  }
+}
