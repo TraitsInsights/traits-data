@@ -1,0 +1,42 @@
+{
+  "name" : "SILVER-adapter-wyscout",
+  "jobMode" : "SCRIPT",
+  "description" : "",
+  "role" : "arn:aws:iam::127023367472:role/glue-jobs-role",
+  "executionProperty" : {
+    "maxConcurrentRuns" : 500
+  },
+  "command" : {
+    "name" : "glueetl",
+    "scriptLocation" : "s3://aws-glue-assets-127023367472-eu-west-1/scripts/SILVER-adapter-wyscout.py",
+    "pythonVersion" : "3"
+  },
+  "defaultArguments" : {
+    "--enable-metrics" : "true",
+    "--seasons_to_update" : "[\"190042\"]",
+    "--spark-event-logs-path" : "s3://aws-glue-assets-127023367472-eu-west-1/sparkHistoryLogs/",
+    "--enable-job-insights" : "true",
+    "--enable-observability-metrics" : "true",
+    "--enable-glue-datacatalog" : "true",
+    "--enable-continuous-cloudwatch-log" : "true",
+    "--job-bookmark-option" : "job-bookmark-enable",
+    "--job-language" : "python",
+    "--TempDir" : "s3://aws-glue-assets-127023367472-eu-west-1/temporary/",
+    "--default_client_id" : "5",
+    "--enable-auto-scaling" : "true"
+  },
+  "maxRetries" : 0,
+  "allocatedCapacity" : 4,
+  "timeout" : 30,
+  "maxCapacity" : 4.0,
+  "glueVersion" : "4.0",
+  "numberOfWorkers" : 4,
+  "workerType" : "G.1X",
+  "executionClass" : "FLEX",
+  "sourceControlDetails" : {
+    "provider" : "GITHUB",
+    "repository" : "traits-data",
+    "branch" : "main",
+    "folder" : "ADAPTERS"
+  }
+}
