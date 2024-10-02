@@ -1,0 +1,35 @@
+{
+  "name" : "statsbomb-silver",
+  "jobMode" : "SCRIPT",
+  "description" : "cleans new json files and rewrites the statsbomb parquet database",
+  "role" : "arn:aws:iam::127023367472:role/glue-jobs-role",
+  "executionProperty" : {
+    "maxConcurrentRuns" : 20
+  },
+  "command" : {
+    "name" : "pythonshell",
+    "scriptLocation" : "s3://aws-glue-assets-127023367472-eu-west-1/scripts/statsbomb-silver.py",
+    "pythonVersion" : "3.9"
+  },
+  "defaultArguments" : {
+    "--class" : "GlueApp",
+    "--enable-job-insights" : "false",
+    "--enable-observability-metrics" : "false",
+    "--enable-glue-datacatalog" : "true",
+    "--job-language" : "python",
+    "--TempDir" : "s3://aws-glue-assets-127023367472-eu-west-1/temporary/",
+    "--default_client_id" : "25"
+  },
+  "maxRetries" : 0,
+  "allocatedCapacity" : 0,
+  "timeout" : 20,
+  "maxCapacity" : 1.0,
+  "glueVersion" : "3.0",
+  "executionClass" : "STANDARD",
+  "sourceControlDetails" : {
+    "provider" : "GITHUB",
+    "repository" : "traits-data",
+    "branch" : "main",
+    "folder" : "DEPRECATED"
+  }
+}
