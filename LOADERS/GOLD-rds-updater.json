@@ -1,0 +1,35 @@
+{
+  "name" : "GOLD-rds-updater",
+  "jobMode" : "SCRIPT",
+  "description" : "",
+  "role" : "arn:aws:iam::127023367472:role/glue-jobs-role",
+  "executionProperty" : {
+    "maxConcurrentRuns" : 5
+  },
+  "command" : {
+    "name" : "pythonshell",
+    "scriptLocation" : "s3://aws-glue-assets-127023367472-eu-west-1/scripts/GOLD-rds-updater.py",
+    "pythonVersion" : "3.9"
+  },
+  "defaultArguments" : {
+    "--db_cluster_arn" : "arn:aws:rds:eu-west-1:127023367472:cluster:traitsproddb",
+    "--db_credentials_secret_store_arn" : "arn:aws:secretsmanager:eu-west-1:127023367472:secret:traits-prod/aurora/mysql-aHJc2o",
+    "--enable-job-insights" : "false",
+    "--enable-observability-metrics" : "false",
+    "--enable-glue-datacatalog" : "true",
+    "--job-language" : "python",
+    "--TempDir" : "s3://aws-glue-assets-127023367472-eu-west-1/temporary/"
+  },
+  "maxRetries" : 0,
+  "allocatedCapacity" : 0,
+  "timeout" : 15,
+  "maxCapacity" : 1.0,
+  "glueVersion" : "3.0",
+  "executionClass" : "STANDARD",
+  "sourceControlDetails" : {
+    "provider" : "GITHUB",
+    "repository" : "traits-data",
+    "branch" : "main",
+    "folder" : "LOADERS"
+  }
+}
