@@ -1,0 +1,40 @@
+{
+  "name" : "statsbomb-match-bronze",
+  "jobMode" : "SCRIPT",
+  "description" : "Python script for calling Statsbomb endpoint for matches since a client's last refresh. Returned json files are written to s3 and partitioned by league and season.",
+  "role" : "arn:aws:iam::127023367472:role/glue-jobs-role",
+  "executionProperty" : {
+    "maxConcurrentRuns" : 20
+  },
+  "command" : {
+    "name" : "pythonshell",
+    "scriptLocation" : "s3://aws-glue-assets-127023367472-eu-west-1/scripts/statsbomb-match-bronze.py",
+    "pythonVersion" : "3.9"
+  },
+  "defaultArguments" : {
+    "--class" : "GlueApp",
+    "--db_cluster_arn" : "arn:aws:rds:eu-west-1:127023367472:cluster:traitsproddb",
+    "--db_credentials_secret_store_arn" : "arn:aws:secretsmanager:eu-west-1:127023367472:secret:traits-prod/aurora/mysql-aHJc2o",
+    "--enable-job-insights" : "false",
+    "--competitions" : "[\"46\"]",
+    "--enable-observability-metrics" : "false",
+    "--enable-glue-datacatalog" : "true",
+    "--STATSBOMB_AUTH" : "YWxleEB0cmFpdHNpbnNpZ2h0cy5jb206bFdCTjJ4SWU=",
+    "--job-language" : "python",
+    "--TempDir" : "s3://aws-glue-assets-127023367472-eu-west-1/temporary/",
+    "--default_client_id" : "8",
+    "--seasons" : "[\"281\",\"235\"]"
+  },
+  "maxRetries" : 0,
+  "allocatedCapacity" : 0,
+  "timeout" : 60,
+  "maxCapacity" : 1.0,
+  "glueVersion" : "3.0",
+  "executionClass" : "STANDARD",
+  "sourceControlDetails" : {
+    "provider" : "GITHUB",
+    "repository" : "traits-data",
+    "branch" : "main",
+    "folder" : "DEPRECATED"
+  }
+}
