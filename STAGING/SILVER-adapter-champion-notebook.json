@@ -1,0 +1,368 @@
+{
+	"jobConfig": {
+		"name": "SILVER-adapter-champion-notebook",
+		"description": "",
+		"role": "arn:aws:iam::127023367472:role/glue-jobs-role",
+		"command": "glueetl",
+		"version": "4.0",
+		"runtime": null,
+		"workerType": "Standard",
+		"numberOfWorkers": "1",
+		"maxCapacity": 2,
+		"jobRunQueuingEnabled": false,
+		"maxRetries": 0,
+		"timeout": 2880,
+		"maxConcurrentRuns": 1,
+		"security": "none",
+		"scriptName": "SILVER-adapter-champion-notebook.py",
+		"scriptLocation": "s3://aws-glue-assets-127023367472-eu-west-1/scripts/",
+		"language": "python-3",
+		"spark": false,
+		"jobParameters": [],
+		"tags": [],
+		"jobMode": "NOTEBOOK_MODE",
+		"createdOn": "2024-09-10T04:38:00.227Z",
+		"developerMode": false,
+		"connectionsList": [],
+		"temporaryDirectory": "s3://aws-glue-assets-127023367472-eu-west-1/temporary/",
+		"glueHiveMetastore": true,
+		"etlAutoTuning": false,
+		"pythonShellPrebuiltLibraryOption": "analytics",
+		"flexExecution": false,
+		"minFlexWorkers": null,
+		"sourceControlDetails": {
+			"Provider": "GITHUB",
+			"Repository": "traits-data",
+			"Branch": "main",
+			"Folder": "STAGING"
+		},
+		"maintenanceWindow": null,
+		"bookmark": "",
+		"metrics": "",
+		"observabilityMetrics": "",
+		"logging": "",
+		"sparkPath": "",
+		"serverEncryption": false,
+		"pythonPath": null,
+		"dependentPath": "",
+		"referencedPath": "",
+		"etlAutoScaling": false,
+		"etlAutoTuningJobRules": "",
+		"pythonVersion": ""
+	},
+	"hasBeenSaved": false,
+	"originalScriptName": "SILVER-adapter-statsbomb-notebook.py",
+	"originalScriptLocation": "s3://aws-glue-assets-127023367472-eu-west-1/scripts/",
+	"script": "# NOTEBOOK CONFIG\n\n### PARAMETERS\nseasons_to_update = [\"AFL_2024\"]\nclient_id =  6 # use this for testing variations\n### Libraries and config\nimport ast\nimport re\nimport sys\nimport json\nimport boto3\nimport pandas as pd\nimport pyspark.sql.functions as F\nfrom datetime import datetime\nfrom time import time\nfrom pyspark.sql import SparkSession\nfrom awsglue.utils import getResolvedOptions\nfrom pyspark.context import SparkContext\nfrom awsglue.context import GlueContext\nfrom awsglue.dynamicframe import DynamicFrame\nfrom awsglue.job import Job\nfrom pyspark.sql.window import Window\nfrom pyspark.sql.functions import explode, concat, col, lit, udf, expr, array_max, collect_list, sum as _sum, year, to_date, first, struct, input_file_name, regexp_extract, when, concat, countDistinct, rank\nfrom pyspark.sql.types import IntegerType, StringType, ArrayType, StructType\nfrom datetime import datetime, timedelta\nfrom s3fs import S3FileSystem\nimport warnings\n\n### Initialise clients\nsc = SparkContext.getOrCreate()\nglueContext = GlueContext(sc)\nspark = glueContext.spark_session\njob = Job(glueContext)\ns3 = S3FileSystem()\n# ### Variables ###\n\n# # Retrieve arguments passed from STEP FUNCTION map as parameter\n# # NB: Wyscout Data Warehouse is centralised, so client_id can be used as a proxy for production / other replication\n# try:\n#     args = getResolvedOptions(sys.argv, ['client_id', 'seasons_to_update'])\n#     client_id = args['client_id']\n# except:\n#     args = getResolvedOptions(sys.argv, ['default_client_id', 'seasons_to_update'])\n#     client_id = args['default_client_id']\n    \n# # Convert to strings\n# seasons_to_update = [str(s) for s in ast.literal_eval(args['seasons_to_update'])]\n    \n# Threshold for minutes in a game for it to contribute to a profile sample\nplaytime_threshold = 60\n# Columns to pass to output in addition to features\nmeta_cols = ['profileId',\n'playerId',\n'teamId',\n'competitionId',\n'seasonId',\n'seasonPartition',\n'startYear',\n'endYear',\n'age',\n'playerName',\n'teamName',\n'seasonName',\n'seasonDisplayName',\n'competitionName',\n'competitionShortName',\n'fullName',\n'nationality',\n'birthDate',\n'positionGroup',\n'positionName',\n'positionAbbreviation',\n'teamSeason',\n'playerTeamSeason',\n'playerTeamSeasonCompetition',\n]\n\ninteger_columns = ['startYear',\n'endYear',\n'age',\n'totalMinutesInSample',\n'sampleSize',\n'totalMinutesForSeason',\n'appearancesForSeason']\n\nstring_columns = ['profileId',\n'playerId',\n'teamId',\n'competitionId',\n'seasonId',\n'seasonPartition',\n'playerName',\n'teamName',\n'seasonName',\n'seasonDisplayName',\n'competitionName',\n'competitionShortName',\n'fullName',\n'nationality',\n'birthDate',\n'positionGroup',\n'positionName',\n'positionAbbreviation',\n'teamSeason',\n'playerTeamSeason',\n'playerTeamSeasonCompetition',\n'aggregationPeriod']\n### Helper functions ###\n\ndef load_csv_files(directory):\n    s3 = S3FileSystem()\n    files = s3.ls(directory)\n    \n    dataframes = []\n    for filename in files:\n        if filename.endswith('.csv'):\n            file_path = 's3://' + filename\n            df = pd.read_csv(file_path, encoding='utf-8')\n            cols = df.columns.values\n            league = filename.split(\"/\")[-1].split(\"_\")[-2]\n            season = filename.split(\"_\")[-1][0:-4]\n            print(league, \"-\", season)\n            df['seasonName'] = season\n            df['competitionName'] = league\n            if 'Player Name' in df.columns:\n                df['playerId'] = df['Player Name'] + ' ' + df['DOB']\n                df['playerSeason'] = df['Player Name'] + ' ' + season\n            else:\n                df['playerId'] = df['Player'] + ' ' + df['DOB']\n                df['playerSeason'] = df['Player'] + ' ' + season\n            dataframes.append(df)\n    if dataframes:\n        merged_df = pd.concat(dataframes, ignore_index=True)\n        merged_df['playerName'] = merged_df['Full Name'].fillna(merged_df['Player Name'].fillna(merged_df['Player']))\n        merged_df['birthDate'] = merged_df['DOB']\n        return merged_df\n    else:\n        return None\n\n# TODO: Player Name includes a team variable which will prevent career page lookups from working!\n\ndef print_shape(df) -> None:\n    try:\n        row_count = df.count()\n        col_count = len(df.columns)\n        print(f\"Shape: {row_count} rows, {col_count} columns\")\n    except Exception as e:\n        print(f\"Error getting shape for {df_name}: {e}\")\n### Pre-load merge tables [retrieved information] ###\n\n# Position mapping dictionary\ntry:\n    with s3.open(f's3://traits-app/settings/positions_map.json', 'r', encoding='utf-8') as f:\n        pos_key = json.load(f)['CHAMPION']\n    pos_key = {k: oldk for oldk, oldv in pos_key.items() for k in oldv}\nexcept FileNotFoundError:\n    print(\"positions_map.json file not found\")\nexcept ValueError:\n    print(\"positions_map.json file is not in the expected format\")\n\n# Players\n# TODO: restrict to seasons in batch\nplayers_df = load_csv_files('s3://traits-app/bronze-raw/champion/players/')\nprint(\"Players loaded.\")\n### ETL PROCESSING ###    \n\nprint(f\"Parsing seasons: {seasons_to_update}\")\n\nstart = time()\n\n# Read player statistics from csvs\nbase_path = \"s3://traits-app/bronze-raw/champion/seasons/stats/\"\npaths = [f\"{base_path}{season}.csv\" for season in seasons_to_update]\n    \n# Read the CSV files into a DataFrame\ndf_matches = spark.read.csv(\n    paths, \n    header=True,\n    inferSchema=True,\n    multiLine=False,\n    mode='PERMISSIVE'\n)\n\nprint_shape(df_matches)\n\n# Create player and match ids\n# TODO: add opposition to parser\ndf_matches = df_matches.withColumn(\"matchId\", concat(col(\"R\"), col(\"S\")))\ndf_matches = df_matches.withColumn(\"playerSeason\", concat(col(\"Player\"), lit(' '), col(\"season_name\")))\n# Create unique team names\n\nteam_renames = {\n'AFLW':' W',\n'Coates League Boys': ' Boys',\n'Coates League Girls': ' Girls',\n'SANFL': ' SA',\n'SANFL Reserves': ' SA Res',\n'SANFL U18': ' SA U18',\n'SANFLW': '(W) SA',\n'U18 Boys Championships':' Champs B',\n'U18 Girls Championships':' Champs G',\n'VFL':' VFL',\n'VFLW':' VFLW',\n'WAFL':' WAFL',\n'WAFL Reserves':' WAFL Res',\n'WAFL Colts':' WAFL U18',\n'WAFLW':' (W) WA'\n}\n### Map position designations\n\n# Map the positionGroup to the Wyscout abbreviation the position map\nbroadcast_pos_map = spark.sparkContext.broadcast(pos_key)\n\ndef map_position_to_abbr(position_name):\n    return broadcast_pos_map.value.get(position_name, None)\n\nmap_position_to_abbr_udf = udf(map_position_to_abbr, StringType())\n\n# Extract the *first listed positionName and positionCode* from Wyscout's positions dictionary\ndf_matches = df_matches.withColumn(\"positionName\", col(\"Position\"))\ndf_matches = df_matches.withColumn(\"positionAbbreviation\", col(\"Position\"))\ndf_matches = df_matches.withColumn(\"positionGroup\", map_position_to_abbr_udf(col(\"positionAbbreviation\")))\n\n### Create \"Any\" designation\n\n# Create rows that will not apply gametime thresholds, marked as \"ANY\" in positionGroup, positionName, positionCode\nduplicated_df = df_matches.withColumn(\"positionGroup\", F.lit(\"ANY\"))\\\n                .withColumn(\"positionName\", F.lit(\"ANY\"))\\\n                .withColumn(\"positionAbbreviation\", F.lit(\"ANY\"))\n\n# Append to original positions frame\ndf_matches = df_matches.unionByName(duplicated_df)\n\n# Drop games either subbed on or off, but keep all \"ANY\" rows\n# TODO: refine logic for non-AFL where seconds not kept\ndf_split = df_matches.filter(\n    (col('SUB_ON') == 0) & (col('SUB_OFF')==0) | (col('positionGroup') == \"ANY\")\n)\n\nprint_shape(df_split)\n\n# ### OPTIONAL check for unique player per match rows\n\n# # Check to ensure there is only two rows per player per match\n# check_df = df_split.groupBy(\"Player\", \"S\", \"matchId\").count()\n\n# # Filter to find invalid rows\n# invalid_rows_df = check_df.filter(check_df['count'] > 2)\n\n# # # Show the shape of the invalid filtered rows and a sample of those rows\n# if invalid_rows_df.count() > 0:\n#     print(f\"Number of total rows (after union): {df_matches.count()}\")\n#     print(f\"Number of invalid rows (after union): {invalid_rows_df.count()}\")\n#     # invalid_sample = invalid_rows_df.orderBy(F.col(\"playerId\")).select(\"playerId\", \"matchId\").show(5, truncate=False)\n#     raise ValueError(\"There are more than two rows for some players in some matches (after union)\")\n### COLUMN CREATIONS TO CONFORM TO SILVER CONVENTION incl cAmelCasE\n\n# ----------------------------\n# 1. Rename Columns\n# ----------------------------\ndf_split = df_split.withColumnRenamed(\"Mt\", \"appearances\")\ndf_split = df_split.withColumnRenamed(\"League\", \"competitionName\")\ndf_split = df_split.withColumnRenamed(\"Position\", \"detailedPosition\")\ndf_split = df_split.withColumnRenamed(\"Player\", \"player_team\")\ndf_split = df_split.withColumnRenamed(\"S\", \"teamName\")\ndf_split = df_split.withColumnRenamed(\"Height\", \"playerHeight\")\ndf_split = df_split.withColumnRenamed(\"Weight\", \"playerWeight\")\ndf_split = df_split.withColumnRenamed(\"season_name\", \"seasonName\")\ndf_split = df_split.withColumnRenamed(\"season_id\", \"seasonId\")\ndf_split = df_split.withColumnRenamed(\"competition_name\", \"competitionName\")\ndf_split = df_split.withColumnRenamed(\"competition_id\", \"competitionId\")\n\n# ----------------------------\n# 2. Merge Player Data\n# ----------------------------\nplayers_df = players_df.dropna(subset=['playerId'])\nplayers_sdf = spark.createDataFrame(players_df[[\"playerId\", \"playerSeason\", \"playerName\", \"birthDate\", \"Height\", \"Weight\"]])\ndf_split = df_split.join(players_sdf, on=\"playerSeason\", how=\"left\")\n\nprint(\"Player data merged.\")\n\n# ----------------------------\n# 4. Rename Teams to Maintain Uniqueness Across Leagues\n# ----------------------------\n\nbroadcast_team_renames = spark.sparkContext.broadcast(team_renames)\n\n# Define UDF to add suffix based on competitionName\ndef add_suffix_udf(competition, team):\n    suffix = broadcast_team_renames.value.get(competition, \"\")\n    return team + suffix\n\nadd_suffix = udf(add_suffix_udf, StringType())\n\n# Extract 'teamAbbr' using regexp_extract\ndf_split = df_split.withColumn(\"teamId\", regexp_extract(col(\"playerSeason\"), r'\\(([^)]*)\\)', 1))\n\n# Split 'teamAbbr' by comma and take the first part as 'teamName'\n# df_split = df_split.withColumn(\"teamName\", trim(split(col(\"teamAbbr\"), \",\").getItem(0)))\n\n# Add suffix to 'teamName' based on 'competitionName'\ndf_split = df_split.withColumn(\"teamName\", add_suffix(col(\"competitionName\"), col(\"teamName\")))\n\n# DELETE\n# Show unique team names (optional)\ndf_split.select(\"teamName\").distinct().show(truncate=False)\n\n# ----------------------------\n# 5. Create Additional Columns\n# ----------------------------\n\n# Define UDF for calculating age (if not using built-in functions)\ndef calculate_age(dob_str, reference_date_str):\n    try:\n        dob = datetime.strptime(dob_str, \"%d/%m/%Y\")\n        reference_date = datetime.strptime(reference_date_str, \"%d/%m/%Y\")\n        age = reference_date.year - dob.year - ((reference_date.month, reference_date.day) < (dob.month, dob.day))\n        return age\n    except Exception:\n        return None\n\ncalculate_age_udf = udf(calculate_age, IntegerType())\n\ndf_split = df_split.withColumn(\"latterYear\", regexp_extract(col(\"seasonName\"), r'(\\d+)', 1))\ndf_split = df_split.withColumn(\"nationality\", lit(\"Australia\"))\ndf_split = df_split.withColumn(\"referenceDate\", F.concat_ws(\"/\", lit(\"31\"), lit(\"12\"), col(\"latterYear\")))\ndf_split = df_split.withColumn(\"age\", calculate_age_udf(col(\"birthDate\"), col(\"referenceDate\")))\ndf_split = df_split.withColumn(\"startYear\", col(\"seasonName\"))\ndf_split = df_split.withColumn(\"endYear\", col(\"latterYear\"))\ndf_split = df_split.withColumn(\"seasonDisplayName\", col(\"seasonName\"))\ndf_split = df_split.withColumn(\"competitionShortName\", col(\"competitionName\"))  # not relevant\ndf_split = df_split.withColumn(\"seasonPartition\", col(\"seasonId\"))\ndf_split = df_split.withColumn(\"fullName\", col(\"playerName\"))  # F.concat_ws(\" \", df_split[\"firstName\"],  df_split[\"lastName\"]))\ndf_split = df_split.withColumn(\"teamSeason\", F.concat(df_split[\"teamName\"], F.lit(\" \"), df_split[\"seasonName\"]))\ndf_split = df_split.withColumn(\"playerTeamSeason\", F.concat(df_split[\"playerName\"], F.lit(\" \"), df_split[\"teamSeason\"]))\ndf_split = df_split.withColumn(\"playerTeamSeasonCompetition\", F.concat(df_split[\"playerTeamSeason\"], F.lit(\" \"), df_split[\"competitionShortName\"]))\ndf_split = df_split.withColumn(\"profileId\", F.concat(df_split[\"playerId\"].cast(\"string\"),\n                                             df_split[\"teamId\"].cast(\"string\"),\n                                             df_split[\"seasonId\"].cast(\"string\"),\n                                             df_split[\"competitionId\"].cast(\"string\"),\n                                             df_split[\"positionGroup\"]))\n\n# Drop NA playerIds\ndf_split = df_split.where(df_split.playerId.isNotNull())\n# Read in feature formula map\nretrieved_features = pd.read_csv(f's3://traits-app/settings/feature_store_champion.csv')\n\n# Start building the SQL query\nsql_query_features = \"SELECT m.profileId, COUNT(m.profileId) AS sampleSize, SUM(m.ON_STINT_SECS) AS totalMinutesInSample\" # COUNT(m.matchId) AS Appearances\n\n# Iterate through the DataFrame to populate the dictionary\nfor _, row in retrieved_features.iterrows():\n    feature_name = row['feature_name']\n    if pd.notna(row['base_sql']):  # Ensure there is a base SQL to work with\n        print(f\"{feature_name} compiled.\")\n        sql_query_features += f\", {row['base_sql']} AS {feature_name}\"\n    else:\n        print(ValueError(f\"Valid base_sql does not exist for feature '{feature_name}'\"))\n            \n# Finish the SQL query by specifying the source and grouping condition\nsql_query_features += \" FROM {table_name} m GROUP BY m.profileId\"\n\n# Apply the SQL statement\ndf_split.createOrReplaceTempView(\"matches_season\")\ndf_features = spark.sql(sql_query_features.format(table_name='matches_season'))\n\n# Identify aggregationPeriod\ndf_features = df_features.withColumn(\"aggregationPeriod\", lit(\"season\"))\n### Repeat for last four and eight games\n# TODO: wrap into function which accepts last_x parameter\n# Filter for top 4 and top 8 matches (for each profile, not by gameweek)\nwindowSpec = Window.partitionBy(\"profileId\").orderBy(col(\"matchId\").desc()) # Assumes match ids are ascending\ndf_ranked = df_split.withColumn(\"rank\", rank().over(windowSpec))\ndf_last4 = df_ranked.filter(col(\"rank\") <= 4)\ndf_last8 = df_ranked.filter(col(\"rank\") <= 8)\n\ndf_last4.createOrReplaceTempView(\"matches_4\")\ndf_last8.createOrReplaceTempView(\"matches_8\")\n\ndf_features_4 = spark.sql(sql_query_features.format(table_name=\"matches_4\"))\ndf_features_8 = spark.sql(sql_query_features.format(table_name=\"matches_8\"))\n\ndf_features_4 = df_features_4.withColumn(\"aggregationPeriod\", lit(\"last_four\"))\ndf_features_8 = df_features_8.withColumn(\"aggregationPeriod\", lit(\"last_eight\"))\n\n# NB: pay attention to order of operations here\n# Concatenate all the DataFrames\ndf_features = df_features.unionByName(df_features_4).unionByName(df_features_8)\n### Remerge meta info to aggregated DataFrame\n# NB: there may be duplicates on position_name here, hence information loss\ndf_features = df_features.join(df_split.select(meta_cols).dropDuplicates(['profileId']), on=\"profileId\", how=\"left\")\n\n# NOTE: there will be duplicate profileIds at this point\n# Update profileId (represents profile participation and aggregation)\ndf_features = df_features.withColumn(\"profileId\", concat(df_features[\"profileId\"], lit(\"-\"), df_features[\"aggregationPeriod\"]))\n\n# Merge total player-season minutes and appearance counts to profiles\n# NB: this does not apply any thresholding on contributing matches (see upstream)\nany_df = df_features.filter((df_features.positionGroup == 'ANY') & (df_features.aggregationPeriod == 'season')) \nany_df = any_df.withColumnRenamed(\"totalMinutesInSample\", \"totalMinutesForSeason\")\\\n                            .withColumnRenamed(\"sampleSize\", \"appearancesForSeason\")\n\ndf_features = df_features.join(any_df.select(\"playerId\", \"teamId\", \"seasonId\", \"competitionId\", \"totalMinutesForSeason\", \"appearancesForSeason\"),\n                               on=[\"playerId\", \"teamId\", \"seasonId\", \"competitionId\"], how=\"left\") #  TODO: merge on pre-aggregation period profileId\n\nprint_shape(df_features)\n\n# # TODO: Assert no duplicates\n# assert df_features.count() - df_features.dropDuplicates([\"playerTeamSeasonCompetition\", \"aggregationPeriod\"]).count() == 0\n# assert df_features.count() - df_features.dropDuplicates([\"profileId\"]).count() == 0\n### SOME CHECKS (Optional)\nprint_shape(df_features) # all profiles\nprint_shape(df_features.dropDuplicates([\"playerTeamSeasonCompetition\", \"aggregationPeriod\"])) # profiles without PTSCA dupes\nprint_shape(df_features.dropDuplicates([\"profileId\"])) # proiles without profileId dupes\n### Enforce output table data types\n# NB: all unspecified columns will be floats for simplicity\n\nfor column_name in df_features.columns:\n    if column_name in integer_columns:\n        df_features = df_features.withColumn(column_name, col(column_name).cast('integer'))\n    elif column_name in string_columns:\n        df_features = df_features.withColumn(column_name, col(column_name).cast('string'))\n    else:\n        df_features = df_features.withColumn(column_name, col(column_name).cast('double'))\n# Basic write DataFrame to S3 with overwrite mode\ndf_features.write \\\n    .mode(\"overwrite\") \\\n    .partitionBy(\"seasonPartition\") \\\n    .format(\"parquet\") \\\n    .option(\"compression\", \"snappy\") \\\n    .save(f\"s3://traits-app/silver-cleaned/{client_id}\")\n\n# TODO: add logs incl. schema pre-write, post-enforcement\ndf_features.printSchema()\n\nprint(\"Write successful.\")\n### DELETE\ndf_features.toPandas().to_csv(f\"s3://traits-app/silver-cleaned/{client_id}_features_test.csv\")\njob.commit()",
+	"notebook": {
+		"metadata": {
+			"kernelspec": {
+				"name": "glue_pyspark",
+				"display_name": "Glue PySpark",
+				"language": "python"
+			},
+			"language_info": {
+				"name": "Python_Glue_Session",
+				"mimetype": "text/x-python",
+				"codemirror_mode": {
+					"name": "python",
+					"version": 3
+				},
+				"pygments_lexer": "python3",
+				"file_extension": ".py"
+			}
+		},
+		"nbformat_minor": 4,
+		"nbformat": 4,
+		"cells": [
+			{
+				"cell_type": "code",
+				"source": "# NOTEBOOK CONFIG\n\n%idle_timeout 1440\n%glue_version 4.0\n%worker_type Standard\n%number_of_workers 1",
+				"metadata": {
+					"trusted": true,
+					"editable": true
+				},
+				"execution_count": 5,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "Welcome to the Glue Interactive Sessions Kernel\nFor more information on available magic commands, please type %help in any new cell.\n\nPlease view our Getting Started page to access the most up-to-date information on the Interactive Sessions kernel: https://docs.aws.amazon.com/glue/latest/dg/interactive-sessions.html\nInstalled kernel version: 1.0.5 \nCurrent idle_timeout is None minutes.\nidle_timeout has been set to 1440 minutes.\nSetting Glue version to: 4.0\nPrevious worker type: None\nSetting new worker type to: Standard\nPrevious number of workers: None\nSetting new number of workers to: 1\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "### PARAMETERS\nseasons_to_update = [\"AFL_2024\"]\nclient_id =  6 # use this for testing variations",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 1,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "Trying to create a Glue session for the kernel.\nSession Type: glueetl\nWorker Type: Standard\nNumber of Workers: 1\nIdle Timeout: 1440\nSession ID: 9ef6de14-7737-4b00-b48d-01aea358b4ee\nApplying the following default arguments:\n--glue_kernel_version 1.0.5\n--enable-glue-datacatalog true\nWaiting for session 9ef6de14-7737-4b00-b48d-01aea358b4ee to get into ready status...\nSession 9ef6de14-7737-4b00-b48d-01aea358b4ee has been created.\n\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "### Libraries and config\nimport ast\nimport re\nimport sys\nimport json\nimport boto3\nimport pandas as pd\nimport pyspark.sql.functions as F\nfrom datetime import datetime\nfrom time import time\nfrom pyspark.sql import SparkSession\nfrom awsglue.utils import getResolvedOptions\nfrom pyspark.context import SparkContext\nfrom awsglue.context import GlueContext\nfrom awsglue.dynamicframe import DynamicFrame\nfrom awsglue.job import Job\nfrom pyspark.sql.window import Window\nfrom pyspark.sql.functions import explode, concat, col, lit, udf, expr, array_max, collect_list, sum as _sum, year, to_date, first, struct, input_file_name, regexp_extract, when, concat, countDistinct, rank\nfrom pyspark.sql.types import IntegerType, StringType, ArrayType, StructType\nfrom datetime import datetime, timedelta\nfrom s3fs import S3FileSystem\nimport warnings\n\n### Initialise clients\nsc = SparkContext.getOrCreate()\nglueContext = GlueContext(sc)\nspark = glueContext.spark_session\njob = Job(glueContext)\ns3 = S3FileSystem()",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 2,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "# ### Variables ###\n\n# # Retrieve arguments passed from STEP FUNCTION map as parameter\n# # NB: Wyscout Data Warehouse is centralised, so client_id can be used as a proxy for production / other replication\n# try:\n#     args = getResolvedOptions(sys.argv, ['client_id', 'seasons_to_update'])\n#     client_id = args['client_id']\n# except:\n#     args = getResolvedOptions(sys.argv, ['default_client_id', 'seasons_to_update'])\n#     client_id = args['default_client_id']\n    \n# # Convert to strings\n# seasons_to_update = [str(s) for s in ast.literal_eval(args['seasons_to_update'])]\n    \n# Threshold for minutes in a game for it to contribute to a profile sample\nplaytime_threshold = 60",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 3,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "# Columns to pass to output in addition to features\nmeta_cols = ['profileId',\n'playerId',\n'teamId',\n'competitionId',\n'seasonId',\n'seasonPartition',\n'startYear',\n'endYear',\n'age',\n'playerName',\n'teamName',\n'seasonName',\n'seasonDisplayName',\n'competitionName',\n'competitionShortName',\n'fullName',\n'nationality',\n'birthDate',\n'positionGroup',\n'positionName',\n'positionAbbreviation',\n'teamSeason',\n'playerTeamSeason',\n'playerTeamSeasonCompetition',\n]\n\ninteger_columns = ['startYear',\n'endYear',\n'age',\n'totalMinutesInSample',\n'sampleSize',\n'totalMinutesForSeason',\n'appearancesForSeason']\n\nstring_columns = ['profileId',\n'playerId',\n'teamId',\n'competitionId',\n'seasonId',\n'seasonPartition',\n'playerName',\n'teamName',\n'seasonName',\n'seasonDisplayName',\n'competitionName',\n'competitionShortName',\n'fullName',\n'nationality',\n'birthDate',\n'positionGroup',\n'positionName',\n'positionAbbreviation',\n'teamSeason',\n'playerTeamSeason',\n'playerTeamSeasonCompetition',\n'aggregationPeriod']",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 4,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "### Helper functions ###\n\ndef load_csv_files(directory):\n    s3 = S3FileSystem()\n    files = s3.ls(directory)\n    \n    dataframes = []\n    for filename in files:\n        if filename.endswith('.csv'):\n            file_path = 's3://' + filename\n            df = pd.read_csv(file_path, encoding='utf-8')\n            cols = df.columns.values\n            league = filename.split(\"/\")[-1].split(\"_\")[-2]\n            season = filename.split(\"_\")[-1][0:-4]\n            print(league, \"-\", season)\n            df['seasonName'] = season\n            df['competitionName'] = league\n            if 'Player Name' in df.columns:\n                df['playerId'] = df['Player Name'] + ' ' + df['DOB']\n                df['playerSeason'] = df['Player Name'] + ' ' + season\n            else:\n                df['playerId'] = df['Player'] + ' ' + df['DOB']\n                df['playerSeason'] = df['Player'] + ' ' + season\n            dataframes.append(df)\n    if dataframes:\n        merged_df = pd.concat(dataframes, ignore_index=True)\n        merged_df['playerName'] = merged_df['Full Name'].fillna(merged_df['Player Name'].fillna(merged_df['Player']))\n        merged_df['birthDate'] = merged_df['DOB']\n        return merged_df\n    else:\n        return None\n\n# TODO: Player Name includes a team variable which will prevent career page lookups from working!\n\ndef print_shape(df) -> None:\n    try:\n        row_count = df.count()\n        col_count = len(df.columns)\n        print(f\"Shape: {row_count} rows, {col_count} columns\")\n    except Exception as e:\n        print(f\"Error getting shape for {df_name}: {e}\")",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 80,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "### Pre-load merge tables [retrieved information] ###\n\n# Position mapping dictionary\ntry:\n    with s3.open(f's3://traits-app/settings/positions_map.json', 'r', encoding='utf-8') as f:\n        pos_key = json.load(f)['CHAMPION']\n    pos_key = {k: oldk for oldk, oldv in pos_key.items() for k in oldv}\nexcept FileNotFoundError:\n    print(\"positions_map.json file not found\")\nexcept ValueError:\n    print(\"positions_map.json file is not in the expected format\")\n\n# Players\n# TODO: restrict to seasons in batch\nplayers_df = load_csv_files('s3://traits-app/bronze-raw/champion/players/')\nprint(\"Players loaded.\")",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 81,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "AFLWU18 - 2017\nAFLWU18 - 2018\nAFLWU18 - 2019\nAFLWU18 - 2021\nAFLWU18 - 2022\nAFLWU18 - 2023\nAFLW - 2017\nAFLW - 2018\nAFLW - 2019\nAFLW - 2020\nAFLW - 2021\nAFLW - 2022\nAFLW - 2022B\nAFLW - 2023\nAFLW - 2024\nAFL - 2010\nAFL - 2011\nAFL - 2012\nAFL - 2013\nAFL - 2014\nAFL - 2015\nAFL - 2016\nAFL - 2017\nAFL - 2018\nAFL - 2019\nAFL - 2020\nAFL - 2021\nAFL - 2022\nAFL - 2023\nAFL - 2024\nCoates League Boys - 2015\nCoates League Boys - 2016\nCoates League Boys - 2017\nCoates League Boys - 2018\nCoates League Boys - 2019\nCoates League Boys - 2021\nCoates League Boys - 2022\nCoates League Boys - 2023\nCoates League Boys - 2024\nCoates League Girls - 2019\nCoates League Girls - 2020\nCoates League Girls - 2021\nCoates League Girls - 2022\nCoates League Girls - 2023\nCoates League Girls - 2024\nSANFL Reserves - 2023\nSANFL Reserves - 2024\nSANFL U18 - 2015\nSANFL U18 - 2016\nSANFL U18 - 2017\nSANFL U18 - 2018\nSANFL U18 - 2019\nSANFL U18 - 2020\nSANFL U18 - 2021\nSANFL U18 - 2022\nSANFL U18 - 2023\nSANFL U18 - 2024\nSANFLW - 2017\nSANFLW - 2018\nSANFLW - 2019\nSANFLW - 2020\nSANFLW - 2021\nSANFLW - 2022\nSANFLW - 2023\nSANFLW - 2024\nSANFL - 2015\nSANFL - 2016\nSANFL - 2017\nSANFL - 2018\nSANFL - 2019\nSANFL - 2020\nSANFL - 2021\nSANFL - 2022\nSANFL - 2023\nSANFL - 2024\nU18 Boys Championships - 2015\nU18 Boys Championships - 2016\nU18 Boys Championships - 2017\nU18 Boys Championships - 2018\nU18 Boys Championships - 2019\nU18 Boys Championships - 2021\nU18 Boys Championships - 2022\nU18 Boys Championships - 2023\nU18 Boys Championships - 2024\nU18 Boys Champs - 2024\nU18 Girls Championships - 2017\nU18 Girls Championships - 2018\nU18 Girls Championships - 2019\nU18 Girls Championships - 2021\nU18 Girls Championships - 2022\nU18 Girls Championships - 2023\nU18 Girls Championships - 2024\nVFLW - 2018\nVFLW - 2019\nVFLW - 2021\nVFLW - 2022\nVFLW - 2023\nVFLW - 2024\nVFL - 2013\nVFL - 2014\nVFL - 2015\nVFL - 2016\nVFL - 2017\nVFL - 2018\nVFL - 2019\nVFL - 2021\nVFL - 2022\nVFL - 2023\nVFL - 2024\nWAFL Colts - 2015\nWAFL Colts - 2016\nWAFL Colts - 2017\nWAFL Colts - 2018\nWAFL Colts - 2019\nWAFL Colts - 2020\nWAFL Colts - 2021\nWAFL Colts - 2022\nWAFL Colts - 2023\nWAFL Colts - 2024\nWAFL Reserves - 2023\nWAFL Reserves - 2024\nWAFLW - 2022\nWAFLW - 2023\nWAFLW - 2024\nWAFL - 2015\nWAFL - 2016\nWAFL - 2017\nWAFL - 2018\nWAFL - 2019\nWAFL - 2020\nWAFL - 2021\nWAFL - 2022\nWAFL - 2023\nWAFL - 2024\nPlayers loaded.\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "### ETL PROCESSING ###    \n\nprint(f\"Parsing seasons: {seasons_to_update}\")\n\nstart = time()\n\n# Read player statistics from csvs\nbase_path = \"s3://traits-app/bronze-raw/champion/seasons/stats/\"\npaths = [f\"{base_path}{season}.csv\" for season in seasons_to_update]\n    \n# Read the CSV files into a DataFrame\ndf_matches = spark.read.csv(\n    paths, \n    header=True,\n    inferSchema=True,\n    multiLine=False,\n    mode='PERMISSIVE'\n)\n\nprint_shape(df_matches)\n\n# Create player and match ids\n# TODO: add opposition to parser\ndf_matches = df_matches.withColumn(\"matchId\", concat(col(\"R\"), col(\"S\")))\ndf_matches = df_matches.withColumn(\"playerSeason\", concat(col(\"Player\"), lit(' '), col(\"season_name\")))",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 87,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "Parsing seasons: ['AFL_2024']\nShape: 9890 rows, 343 columns\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "# Create unique team names\n\nteam_renames = {\n'AFLW':' W',\n'Coates League Boys': ' Boys',\n'Coates League Girls': ' Girls',\n'SANFL': ' SA',\n'SANFL Reserves': ' SA Res',\n'SANFL U18': ' SA U18',\n'SANFLW': '(W) SA',\n'U18 Boys Championships':' Champs B',\n'U18 Girls Championships':' Champs G',\n'VFL':' VFL',\n'VFLW':' VFLW',\n'WAFL':' WAFL',\n'WAFL Reserves':' WAFL Res',\n'WAFL Colts':' WAFL U18',\n'WAFLW':' (W) WA'\n}",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 88,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "### Map position designations\n\n# Map the positionGroup to the Wyscout abbreviation the position map\nbroadcast_pos_map = spark.sparkContext.broadcast(pos_key)\n\ndef map_position_to_abbr(position_name):\n    return broadcast_pos_map.value.get(position_name, None)\n\nmap_position_to_abbr_udf = udf(map_position_to_abbr, StringType())\n\n# Extract the *first listed positionName and positionCode* from Wyscout's positions dictionary\ndf_matches = df_matches.withColumn(\"positionName\", col(\"Position\"))\ndf_matches = df_matches.withColumn(\"positionAbbreviation\", col(\"Position\"))\ndf_matches = df_matches.withColumn(\"positionGroup\", map_position_to_abbr_udf(col(\"positionAbbreviation\")))\n\n### Create \"Any\" designation\n\n# Create rows that will not apply gametime thresholds, marked as \"ANY\" in positionGroup, positionName, positionCode\nduplicated_df = df_matches.withColumn(\"positionGroup\", F.lit(\"ANY\"))\\\n                .withColumn(\"positionName\", F.lit(\"ANY\"))\\\n                .withColumn(\"positionAbbreviation\", F.lit(\"ANY\"))\n\n# Append to original positions frame\ndf_matches = df_matches.unionByName(duplicated_df)\n\n# Drop games either subbed on or off, but keep all \"ANY\" rows\n# TODO: refine logic for non-AFL where seconds not kept\ndf_split = df_matches.filter(\n    (col('SUB_ON') == 0) & (col('SUB_OFF')==0) | (col('positionGroup') == \"ANY\")\n)\n\nprint_shape(df_split)\n\n# ### OPTIONAL check for unique player per match rows\n\n# # Check to ensure there is only two rows per player per match\n# check_df = df_split.groupBy(\"Player\", \"S\", \"matchId\").count()\n\n# # Filter to find invalid rows\n# invalid_rows_df = check_df.filter(check_df['count'] > 2)\n\n# # # Show the shape of the invalid filtered rows and a sample of those rows\n# if invalid_rows_df.count() > 0:\n#     print(f\"Number of total rows (after union): {df_matches.count()}\")\n#     print(f\"Number of invalid rows (after union): {invalid_rows_df.count()}\")\n#     # invalid_sample = invalid_rows_df.orderBy(F.col(\"playerId\")).select(\"playerId\", \"matchId\").show(5, truncate=False)\n#     raise ValueError(\"There are more than two rows for some players in some matches (after union)\")",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 89,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "Shape: 19355 rows, 348 columns\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "### COLUMN CREATIONS TO CONFORM TO SILVER CONVENTION incl cAmelCasE\n\n# ----------------------------\n# 1. Rename Columns\n# ----------------------------\ndf_split = df_split.withColumnRenamed(\"Mt\", \"appearances\")\ndf_split = df_split.withColumnRenamed(\"League\", \"competitionName\")\ndf_split = df_split.withColumnRenamed(\"Position\", \"detailedPosition\")\ndf_split = df_split.withColumnRenamed(\"Player\", \"player_team\")\ndf_split = df_split.withColumnRenamed(\"S\", \"teamName\")\ndf_split = df_split.withColumnRenamed(\"Height\", \"playerHeight\")\ndf_split = df_split.withColumnRenamed(\"Weight\", \"playerWeight\")\ndf_split = df_split.withColumnRenamed(\"season_name\", \"seasonName\")\ndf_split = df_split.withColumnRenamed(\"season_id\", \"seasonId\")\ndf_split = df_split.withColumnRenamed(\"competition_name\", \"competitionName\")\ndf_split = df_split.withColumnRenamed(\"competition_id\", \"competitionId\")\n\n# ----------------------------\n# 2. Merge Player Data\n# ----------------------------\nplayers_df = players_df.dropna(subset=['playerId'])\nplayers_sdf = spark.createDataFrame(players_df[[\"playerId\", \"playerSeason\", \"playerName\", \"birthDate\", \"Height\", \"Weight\"]])\ndf_split = df_split.join(players_sdf, on=\"playerSeason\", how=\"left\")\n\nprint(\"Player data merged.\")\n\n# ----------------------------\n# 4. Rename Teams to Maintain Uniqueness Across Leagues\n# ----------------------------\n\nbroadcast_team_renames = spark.sparkContext.broadcast(team_renames)\n\n# Define UDF to add suffix based on competitionName\ndef add_suffix_udf(competition, team):\n    suffix = broadcast_team_renames.value.get(competition, \"\")\n    return team + suffix\n\nadd_suffix = udf(add_suffix_udf, StringType())\n\n# Extract 'teamAbbr' using regexp_extract\ndf_split = df_split.withColumn(\"teamId\", regexp_extract(col(\"playerSeason\"), r'\\(([^)]*)\\)', 1))\n\n# Split 'teamAbbr' by comma and take the first part as 'teamName'\n# df_split = df_split.withColumn(\"teamName\", trim(split(col(\"teamAbbr\"), \",\").getItem(0)))\n\n# Add suffix to 'teamName' based on 'competitionName'\ndf_split = df_split.withColumn(\"teamName\", add_suffix(col(\"competitionName\"), col(\"teamName\")))\n\n# DELETE\n# Show unique team names (optional)\ndf_split.select(\"teamName\").distinct().show(truncate=False)\n\n# ----------------------------\n# 5. Create Additional Columns\n# ----------------------------\n\n# Define UDF for calculating age (if not using built-in functions)\ndef calculate_age(dob_str, reference_date_str):\n    try:\n        dob = datetime.strptime(dob_str, \"%d/%m/%Y\")\n        reference_date = datetime.strptime(reference_date_str, \"%d/%m/%Y\")\n        age = reference_date.year - dob.year - ((reference_date.month, reference_date.day) < (dob.month, dob.day))\n        return age\n    except Exception:\n        return None\n\ncalculate_age_udf = udf(calculate_age, IntegerType())\n\ndf_split = df_split.withColumn(\"latterYear\", regexp_extract(col(\"seasonName\"), r'(\\d+)', 1))\ndf_split = df_split.withColumn(\"nationality\", lit(\"Australia\"))\ndf_split = df_split.withColumn(\"referenceDate\", F.concat_ws(\"/\", lit(\"31\"), lit(\"12\"), col(\"latterYear\")))\ndf_split = df_split.withColumn(\"age\", calculate_age_udf(col(\"birthDate\"), col(\"referenceDate\")))\ndf_split = df_split.withColumn(\"startYear\", col(\"seasonName\"))\ndf_split = df_split.withColumn(\"endYear\", col(\"latterYear\"))\ndf_split = df_split.withColumn(\"seasonDisplayName\", col(\"seasonName\"))\ndf_split = df_split.withColumn(\"competitionShortName\", col(\"competitionName\"))  # not relevant\ndf_split = df_split.withColumn(\"seasonPartition\", col(\"seasonId\"))\ndf_split = df_split.withColumn(\"fullName\", col(\"playerName\"))  # F.concat_ws(\" \", df_split[\"firstName\"],  df_split[\"lastName\"]))\ndf_split = df_split.withColumn(\"teamSeason\", F.concat(df_split[\"teamName\"], F.lit(\" \"), df_split[\"seasonName\"]))\ndf_split = df_split.withColumn(\"playerTeamSeason\", F.concat(df_split[\"playerName\"], F.lit(\" \"), df_split[\"teamSeason\"]))\ndf_split = df_split.withColumn(\"playerTeamSeasonCompetition\", F.concat(df_split[\"playerTeamSeason\"], F.lit(\" \"), df_split[\"competitionShortName\"]))\ndf_split = df_split.withColumn(\"profileId\", F.concat(df_split[\"playerId\"].cast(\"string\"),\n                                             df_split[\"teamId\"].cast(\"string\"),\n                                             df_split[\"seasonId\"].cast(\"string\"),\n                                             df_split[\"competitionId\"].cast(\"string\"),\n                                             df_split[\"positionGroup\"]))\n\n# Drop NA playerIds\ndf_split = df_split.where(df_split.playerId.isNotNull())",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 90,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "Player data merged.\n+--------+\n|teamName|\n+--------+\n|NMFC    |\n|FRFC    |\n|GCFC    |\n|GFC     |\n|BFC     |\n|GWS     |\n|WCFC    |\n|RFC     |\n|EFC     |\n|CFC     |\n|SKFC    |\n|PAFC    |\n|AFC     |\n|WBFC    |\n|MFC     |\n|SYFC    |\n|COFC    |\n|HFC     |\n+--------+\n\n/opt/amazon/spark/python/lib/pyspark.zip/pyspark/sql/pandas/conversion.py:474: FutureWarning: iteritems is deprecated and will be removed in a future version. Use .items instead.\n  for column, series in pdf.iteritems():\n/opt/amazon/spark/python/lib/pyspark.zip/pyspark/sql/pandas/conversion.py:486: FutureWarning: iteritems is deprecated and will be removed in a future version. Use .items instead.\n  for column, series in pdf.iteritems():\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "# Read in feature formula map\nretrieved_features = pd.read_csv(f's3://traits-app/settings/feature_store_champion.csv')\n\n# Start building the SQL query\nsql_query_features = \"SELECT m.profileId, COUNT(m.profileId) AS sampleSize, SUM(m.ON_STINT_SECS) AS totalMinutesInSample\" # COUNT(m.matchId) AS Appearances\n\n# Iterate through the DataFrame to populate the dictionary\nfor _, row in retrieved_features.iterrows():\n    feature_name = row['feature_name']\n    if pd.notna(row['base_sql']):  # Ensure there is a base SQL to work with\n        print(f\"{feature_name} compiled.\")\n        sql_query_features += f\", {row['base_sql']} AS {feature_name}\"\n    else:\n        print(ValueError(f\"Valid base_sql does not exist for feature '{feature_name}'\"))\n            \n# Finish the SQL query by specifying the source and grouping condition\nsql_query_features += \" FROM {table_name} m GROUP BY m.profileId\"\n\n# Apply the SQL statement\ndf_split.createOrReplaceTempView(\"matches_season\")\ndf_features = spark.sql(sql_query_features.format(table_name='matches_season'))\n\n# Identify aggregationPeriod\ndf_features = df_features.withColumn(\"aggregationPeriod\", lit(\"season\"))",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 91,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "CLEARANCE compiled.\nFIRST_POSSESSION compiled.\nHIT_OUT_SHARK compiled.\nGATHER_FROM_HITOUT compiled.\nDISPOSAL_PRE compiled.\nHARD_BALL_GET compiled.\nHARD_BALL_GET_POST compiled.\nHARD_BALL_GET_PRE compiled.\nFREE_FOR compiled.\nFREE_FOR_POST compiled.\nFREE_FOR_PRE compiled.\nCRUMB compiled.\nGATHER compiled.\nCONTESTED_POSSESSION compiled.\nCLEARANCES_FIRST_POSSESSION_RATIO compiled.\nBROKEN_TACKLE compiled.\nCONTESTED_POSSESSION_PCT compiled.\nLOOSE_BALL_GET compiled.\nLOOSE_BALL_GET_POST compiled.\nLOOSE_BALL_GET_PRE compiled.\nRECEIVE_HANDBALL compiled.\nUNCONTESTED_POSSESSION compiled.\nUNCONTESTED_MARK compiled.\nDISPOSAL_POST compiled.\nMARK_PLAY_ON compiled.\nRECEIVE_HANDBALL_DISPOSAL_PCT compiled.\nHANDBALL compiled.\nHANDBALL_EFFICIENCY_PCT compiled.\nEFFECTIVE_HANDBALL compiled.\nKICK compiled.\nKICKING_EFFICIENCY_PCT compiled.\nCLANGER_KICK compiled.\nSHORT_EFF_KICK_FROM_POSS compiled.\nLONG_EFF_KICK_FROM_POSS compiled.\nGOAL compiled.\nMISSED_SHOT compiled.\nPOINTS compiled.\nSHOT_AT_GOAL compiled.\nValid base_sql does not exist for feature 'nan'\nINSIDE_50 compiled.\nREBOUND_50 compiled.\nI50_DISPOSAL_PCT compiled.\nR50_DISPOSAL_PCT compiled.\nRUNNING_BOUNCE compiled.\nCONTESTED_KNOCK_ON compiled.\nSCORE_ASSIST compiled.\nSCORE_INVOLVEMENT compiled.\nMARK compiled.\nMARK_DROPPED compiled.\nMARK_ON_LEAD compiled.\nMARK_DISPOSAL_PCT compiled.\nCONTESTED_MARK compiled.\nCONTESTED_MARK_FROM_OPP compiled.\nCONTESTED_MARK_DISPOSAL_PCT compiled.\nFREE_AGAINST_MARKING compiled.\nMARK_FROM_OPP_KICK compiled.\nUNCONTESTED_MARK_FROM_OPP compiled.\nHIT_OUT_SHARKED compiled.\nHIT_OUT_TO_ADVANTAGE compiled.\nHITOUT compiled.\nValid base_sql does not exist for feature 'nan'\nRUCK_CONTEST compiled.\nPLY_ATTEMPTED_TACKLE compiled.\nPLY_INEFFECTIVE_TACKLE compiled.\nValid base_sql does not exist for feature 'nan'\nMISSED_TACKLE compiled.\nRUNDOWN_TACKLE compiled.\nTACKLE compiled.\nTACKLE_POST compiled.\nTACKLE_PRE compiled.\nFREE_AGAINST_TACKLING compiled.\nINTERCEPT compiled.\nDISPOSAL_INTERCEPT_PCT compiled.\nSMOTHER compiled.\nSPOIL compiled.\nnan compiled.\nSPOIL_GAINING_POSSESSION compiled.\nDISPOSAL compiled.\nEFFECTIVE_KICK compiled.\nBEHIND compiled.\nSPOIL_INEFFECTIVE compiled.\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "### Repeat for last four and eight games\n# TODO: wrap into function which accepts last_x parameter\n# Filter for top 4 and top 8 matches (for each profile, not by gameweek)\nwindowSpec = Window.partitionBy(\"profileId\").orderBy(col(\"matchId\").desc()) # Assumes match ids are ascending\ndf_ranked = df_split.withColumn(\"rank\", rank().over(windowSpec))\ndf_last4 = df_ranked.filter(col(\"rank\") <= 4)\ndf_last8 = df_ranked.filter(col(\"rank\") <= 8)\n\ndf_last4.createOrReplaceTempView(\"matches_4\")\ndf_last8.createOrReplaceTempView(\"matches_8\")\n\ndf_features_4 = spark.sql(sql_query_features.format(table_name=\"matches_4\"))\ndf_features_8 = spark.sql(sql_query_features.format(table_name=\"matches_8\"))\n\ndf_features_4 = df_features_4.withColumn(\"aggregationPeriod\", lit(\"last_four\"))\ndf_features_8 = df_features_8.withColumn(\"aggregationPeriod\", lit(\"last_eight\"))\n\n# NB: pay attention to order of operations here\n# Concatenate all the DataFrames\ndf_features = df_features.unionByName(df_features_4).unionByName(df_features_8)",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 92,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "### Remerge meta info to aggregated DataFrame\n# NB: there may be duplicates on position_name here, hence information loss\ndf_features = df_features.join(df_split.select(meta_cols).dropDuplicates(['profileId']), on=\"profileId\", how=\"left\")\n\n# NOTE: there will be duplicate profileIds at this point\n# Update profileId (represents profile participation and aggregation)\ndf_features = df_features.withColumn(\"profileId\", concat(df_features[\"profileId\"], lit(\"-\"), df_features[\"aggregationPeriod\"]))\n\n# Merge total player-season minutes and appearance counts to profiles\n# NB: this does not apply any thresholding on contributing matches (see upstream)\nany_df = df_features.filter((df_features.positionGroup == 'ANY') & (df_features.aggregationPeriod == 'season')) \nany_df = any_df.withColumnRenamed(\"totalMinutesInSample\", \"totalMinutesForSeason\")\\\n                            .withColumnRenamed(\"sampleSize\", \"appearancesForSeason\")\n\ndf_features = df_features.join(any_df.select(\"playerId\", \"teamId\", \"seasonId\", \"competitionId\", \"totalMinutesForSeason\", \"appearancesForSeason\"),\n                               on=[\"playerId\", \"teamId\", \"seasonId\", \"competitionId\"], how=\"left\") #  TODO: merge on pre-aggregation period profileId\n\nprint_shape(df_features)\n\n# # TODO: Assert no duplicates\n# assert df_features.count() - df_features.dropDuplicates([\"playerTeamSeasonCompetition\", \"aggregationPeriod\"]).count() == 0\n# assert df_features.count() - df_features.dropDuplicates([\"profileId\"]).count() == 0",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 93,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "Shape: 3930 rows, 107 columns\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "### SOME CHECKS (Optional)\nprint_shape(df_features) # all profiles\nprint_shape(df_features.dropDuplicates([\"playerTeamSeasonCompetition\", \"aggregationPeriod\"])) # profiles without PTSCA dupes\nprint_shape(df_features.dropDuplicates([\"profileId\"])) # proiles without profileId dupes",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 94,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "Shape: 3930 rows, 107 columns\nShape: 1977 rows, 107 columns\nShape: 3930 rows, 107 columns\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "### Enforce output table data types\n# NB: all unspecified columns will be floats for simplicity\n\nfor column_name in df_features.columns:\n    if column_name in integer_columns:\n        df_features = df_features.withColumn(column_name, col(column_name).cast('integer'))\n    elif column_name in string_columns:\n        df_features = df_features.withColumn(column_name, col(column_name).cast('string'))\n    else:\n        df_features = df_features.withColumn(column_name, col(column_name).cast('double'))",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 95,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "# Basic write DataFrame to S3 with overwrite mode\ndf_features.write \\\n    .mode(\"overwrite\") \\\n    .partitionBy(\"seasonPartition\") \\\n    .format(\"parquet\") \\\n    .option(\"compression\", \"snappy\") \\\n    .save(f\"s3://traits-app/silver-cleaned/{client_id}\")\n\n# TODO: add logs incl. schema pre-write, post-enforcement\ndf_features.printSchema()\n\nprint(\"Write successful.\")",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 96,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "root\n |-- playerId: string (nullable = true)\n |-- teamId: string (nullable = true)\n |-- seasonId: string (nullable = true)\n |-- competitionId: string (nullable = true)\n |-- profileId: string (nullable = true)\n |-- sampleSize: integer (nullable = false)\n |-- totalMinutesInSample: integer (nullable = true)\n |-- CLEARANCE: double (nullable = true)\n |-- FIRST_POSSESSION: double (nullable = true)\n |-- HIT_OUT_SHARK: double (nullable = true)\n |-- GATHER_FROM_HITOUT: double (nullable = true)\n |-- DISPOSAL_PRE: double (nullable = true)\n |-- HARD_BALL_GET: double (nullable = true)\n |-- HARD_BALL_GET_POST: double (nullable = true)\n |-- HARD_BALL_GET_PRE: double (nullable = true)\n |-- FREE_FOR: double (nullable = true)\n |-- FREE_FOR_POST: double (nullable = true)\n |-- FREE_FOR_PRE: double (nullable = true)\n |-- CRUMB: double (nullable = true)\n |-- GATHER: double (nullable = true)\n |-- CONTESTED_POSSESSION: double (nullable = true)\n |-- CLEARANCES_FIRST_POSSESSION_RATIO: double (nullable = true)\n |-- BROKEN_TACKLE: double (nullable = true)\n |-- CONTESTED_POSSESSION_PCT: double (nullable = true)\n |-- LOOSE_BALL_GET: double (nullable = true)\n |-- LOOSE_BALL_GET_POST: double (nullable = true)\n |-- LOOSE_BALL_GET_PRE: double (nullable = true)\n |-- RECEIVE_HANDBALL: double (nullable = true)\n |-- UNCONTESTED_POSSESSION: double (nullable = true)\n |-- UNCONTESTED_MARK: double (nullable = true)\n |-- DISPOSAL_POST: double (nullable = true)\n |-- MARK_PLAY_ON: double (nullable = true)\n |-- RECEIVE_HANDBALL_DISPOSAL_PCT: double (nullable = true)\n |-- HANDBALL: double (nullable = true)\n |-- HANDBALL_EFFICIENCY_PCT: double (nullable = true)\n |-- EFFECTIVE_HANDBALL: double (nullable = true)\n |-- KICK: double (nullable = true)\n |-- KICKING_EFFICIENCY_PCT: double (nullable = true)\n |-- CLANGER_KICK: double (nullable = true)\n |-- SHORT_EFF_KICK_FROM_POSS: double (nullable = true)\n |-- LONG_EFF_KICK_FROM_POSS: double (nullable = true)\n |-- GOAL: double (nullable = true)\n |-- MISSED_SHOT: double (nullable = true)\n |-- POINTS: double (nullable = true)\n |-- SHOT_AT_GOAL: double (nullable = true)\n |-- INSIDE_50: double (nullable = true)\n |-- REBOUND_50: double (nullable = true)\n |-- I50_DISPOSAL_PCT: double (nullable = true)\n |-- R50_DISPOSAL_PCT: double (nullable = true)\n |-- RUNNING_BOUNCE: double (nullable = true)\n |-- CONTESTED_KNOCK_ON: double (nullable = true)\n |-- SCORE_ASSIST: double (nullable = true)\n |-- SCORE_INVOLVEMENT: double (nullable = true)\n |-- MARK: double (nullable = true)\n |-- MARK_DROPPED: double (nullable = true)\n |-- MARK_ON_LEAD: double (nullable = true)\n |-- MARK_DISPOSAL_PCT: double (nullable = true)\n |-- CONTESTED_MARK: double (nullable = true)\n |-- CONTESTED_MARK_FROM_OPP: double (nullable = true)\n |-- CONTESTED_MARK_DISPOSAL_PCT: double (nullable = true)\n |-- FREE_AGAINST_MARKING: double (nullable = true)\n |-- MARK_FROM_OPP_KICK: double (nullable = true)\n |-- UNCONTESTED_MARK_FROM_OPP: double (nullable = true)\n |-- HIT_OUT_SHARKED: double (nullable = true)\n |-- HIT_OUT_TO_ADVANTAGE: double (nullable = true)\n |-- HITOUT: double (nullable = true)\n |-- RUCK_CONTEST: double (nullable = true)\n |-- PLY_ATTEMPTED_TACKLE: double (nullable = true)\n |-- PLY_INEFFECTIVE_TACKLE: double (nullable = true)\n |-- MISSED_TACKLE: double (nullable = true)\n |-- RUNDOWN_TACKLE: double (nullable = true)\n |-- TACKLE: double (nullable = true)\n |-- TACKLE_POST: double (nullable = true)\n |-- TACKLE_PRE: double (nullable = true)\n |-- FREE_AGAINST_TACKLING: double (nullable = true)\n |-- INTERCEPT: double (nullable = true)\n |-- DISPOSAL_INTERCEPT_PCT: double (nullable = true)\n |-- SMOTHER: double (nullable = true)\n |-- SPOIL: double (nullable = true)\n |-- nan: double (nullable = true)\n |-- SPOIL_GAINING_POSSESSION: double (nullable = true)\n |-- DISPOSAL: double (nullable = true)\n |-- EFFECTIVE_KICK: double (nullable = true)\n |-- BEHIND: double (nullable = true)\n |-- SPOIL_INEFFECTIVE: double (nullable = true)\n |-- aggregationPeriod: string (nullable = false)\n |-- seasonPartition: string (nullable = true)\n |-- startYear: integer (nullable = true)\n |-- endYear: integer (nullable = true)\n |-- age: integer (nullable = true)\n |-- playerName: string (nullable = true)\n |-- teamName: string (nullable = true)\n |-- seasonName: string (nullable = true)\n |-- seasonDisplayName: string (nullable = true)\n |-- competitionName: string (nullable = true)\n |-- competitionShortName: string (nullable = true)\n |-- fullName: string (nullable = true)\n |-- nationality: string (nullable = true)\n |-- birthDate: string (nullable = true)\n |-- positionGroup: string (nullable = true)\n |-- positionName: string (nullable = true)\n |-- positionAbbreviation: string (nullable = true)\n |-- teamSeason: string (nullable = true)\n |-- playerTeamSeason: string (nullable = true)\n |-- playerTeamSeasonCompetition: string (nullable = true)\n |-- totalMinutesForSeason: integer (nullable = true)\n |-- appearancesForSeason: integer (nullable = true)\n\nWrite successful.\n",
+						"output_type": "stream"
+					}
+				]
+			},
+			{
+				"cell_type": "code",
+				"source": "### DELETE\ndf_features.toPandas().to_csv(f\"s3://traits-app/silver-cleaned/{client_id}_features_test.csv\")",
+				"metadata": {
+					"trusted": true,
+					"tags": []
+				},
+				"execution_count": 97,
+				"outputs": [
+					{
+						"name": "stdout",
+						"text": "\n",
+						"output_type": "stream"
+					}
+				]
+			}
+		]
+	}
+}
