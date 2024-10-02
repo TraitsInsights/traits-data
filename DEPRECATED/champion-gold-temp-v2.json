@@ -1,0 +1,37 @@
+{
+  "name" : "champion-gold-temp-v2",
+  "jobMode" : "SCRIPT",
+  "description" : "",
+  "role" : "arn:aws:iam::127023367472:role/glue-jobs-role",
+  "executionProperty" : {
+    "maxConcurrentRuns" : 20
+  },
+  "command" : {
+    "name" : "pythonshell",
+    "scriptLocation" : "s3://aws-glue-assets-127023367472-eu-west-1/scripts/champion-gold-copy.py",
+    "pythonVersion" : "3.9"
+  },
+  "defaultArguments" : {
+    "--db_cluster_arn" : "arn:aws:rds:eu-west-1:127023367472:cluster:traitsproddb",
+    "--db_credentials_secret_store_arn" : "arn:aws:secretsmanager:eu-west-1:127023367472:secret:traits-prod/aurora/mysql-aHJc2o",
+    "--current_seasons" : "[\"2014\", \"2015\", \"2016\", \"2017\", \"2018\", \"2019\", \"2020\", \"2021\", \"2022\", \"2022B\", \"2023\",\"2024\"]",
+    "--enable-job-insights" : "false",
+    "--enable-observability-metrics" : "false",
+    "--enable-glue-datacatalog" : "true",
+    "--job-language" : "python",
+    "--TempDir" : "s3://aws-glue-assets-127023367472-eu-west-1/temporary/",
+    "--default_client_id" : "301"
+  },
+  "maxRetries" : 0,
+  "allocatedCapacity" : 0,
+  "timeout" : 15,
+  "maxCapacity" : 1.0,
+  "glueVersion" : "3.0",
+  "executionClass" : "STANDARD",
+  "sourceControlDetails" : {
+    "provider" : "GITHUB",
+    "repository" : "traits-data",
+    "branch" : "main",
+    "folder" : "DEPRECATED"
+  }
+}
